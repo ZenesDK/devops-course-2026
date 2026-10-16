@@ -89,3 +89,27 @@ sudo sshd -T | grep -E "port|permitrootlogin|passwordauthentication|maxauthtries
 sudo ufw status verbose
 hostname -f                   # devops-vm.devops.local
 ```
+
+## 8. Веб-сервер
+- Пакет: nginx (apt)
+- Конфигурация ресурса: /etc/nginx/sites-available/devops-site (симлинк в /etc/nginx/sites-enabled/);
+  стандартный ресурс default отключён (симлинк удалён)
+- Два server-блока: блок 80 — return 301 https://$host$request_uri; блок 443 ssl — TLSv1.2/1.3
+- Каталог ресурса: /var/www/devops-site, владелец devops:devops, права 755/644 (модель «владелец пишет, веб-сервер читает»)
+- Сертификат: /etc/ssl/certs/devops.crt (644, root:root); ключ: /etc/ssl/private/devops.key (600, root:root)
+- Команда формирования (срок 365 дней):
+  sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout /etc/ssl/private/devops.key -out /etc/ssl/certs/devops.crt \
+    -subj "/CN=devops.local" -addext "subjectAltName=DNS:devops.local"
+
+## 8. Веб-сервер
+- Пакет: nginx (apt)
+- Конфигурация ресурса: /etc/nginx/sites-available/devops-site (симлинк в /etc/nginx/sites-enabled/);
+  стандартный ресурс default отключён (симлинк удалён)
+- Два server-блока: блок 80 — return 301 https://$host$request_uri; блок 443 ssl — TLSv1.2/1.3
+- Каталог ресурса: /var/www/devops-site, владелец devops:devops, права 755/644 (модель «владелец пишет, веб-сервер читает»)
+- Сертификат: /etc/ssl/certs/devops.crt (644, root:root); ключ: /etc/ssl/private/devops.key (600, root:root)
+- Команда формирования (срок 365 дней):
+  sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout /etc/ssl/private/devops.key -out /etc/ssl/certs/devops.crt \
+    -subj "/CN=devops.local" -addext "subjectAltName=DNS:devops.local"
