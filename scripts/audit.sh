@@ -1,49 +1,79 @@
 #!/usr/bin/env bash
-set -uo pipefail
+# audit.sh — аудит конфигурации сервера (v2)
+# Запуск: ssh -t devops 'sudo bash ~/audit.sh; echo "код возврата: $?"'
 
-PASS=0; FAIL=0
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Ошибка: запустите скрипт от root (sudo bash $0)" >&2
+  exit 2
+fi
 
-check() {
-    local desc="$1" expected="$2" actual="$3"
-    if [[ "$actual" == "$expected" ]]; then
-        echo "  [OK] $desc"; ((PASS++))
-    else
-        echo "  [FAIL] $desc (ожидалось: '$expected', получено: '$actual')";
-        ((FAIL++))
-    fi
+PASS=0
+FAIL=0
+
+ok() {
+  PASS=$((PASS + 1))
+  printf '  [OK] %s\n' "$1"
 }
 
-echo "Аудит конфигурации: $(hostname -f), $(date '+%Y-%m-%d %H:%M')"
+fail() {
+  FAIL=$((FAIL + 1))
+  printf "  [FAIL] %s (ожидалось: '%s', получено: '%s')\n" "$1" "$2" "$3"
+}
+
+# check "<заголовок>" "<ожидаемое>" "<полученное>" — все аргументы строго в кавычках!
+check() {
+  if [ "$3" = "$2" ]; then ok "$1"; else fail "$1" "$2" "$3"; fi
+}
+
+echo "Аудит конфигурации: $(hostname -f 2>/dev/null || hostname), $(date '+%Y-%m-%d %H:%M')"
 
 echo "[1] Служба SSH"
-check "Вход от имени root запрещён"        "no" "$(sudo sshd -T | awk '/^permitrootlogin/{print $2}')"
-check "Парольная аутентификация отключена" "no" "$(sudo sshd -T | awk '/^passwordauthentication/{print $2}')"
-
-# TODO 1: значение параметра port отлично от 22
-port="$(sudo sshd -T | awk '/^port/{print $2}')"
-check "Порт SSH отличен от 22" "не 22" "$([[ "$port" != "22" ]] && echo "не 22" || echo "22")"
-
-# TODO 2: значение параметра maxauthtries равно 3
-check "MaxAuthTries равен 3" "3" "$(sudo sshd -T | awk '/^maxauthtries/{print $2}')"
+SSHD_T=$(sshd -T 2>/dev/null)
+check "Вход от имени root запрещён" "no" \
+  "$(awk 'tolower($1)=="permitrootlogin"{print tolower($2)}' <<<"$SSHD_T" | tail -n1)"
+check "Парольная аутентификация отключена" "no" \
+  "$(awk 'tolower($1)=="passwordauthentication"{print tolower($2)}' <<<"$SSHD_T" | tail -n1)"
+SSH_PORT=$(awk 'tolower($1)=="port"{print $2}' <<<"$SSHD_T" | head -n1)
+if [ -n "$SSH_PORT" ] && [ "$SSH_PORT" -ne 22 ] 2>/dev/null; then
+  ok "Порт SSH отличен от 22 (используется $SSH_PORT)"
+else
+  fail "Порт SSH отличен от 22" "не 22" "${SSH_PORT:-неизвестно}"
+fi
+check "MaxAuthTries равен 3" "3" \
+  "$(awk 'tolower($1)=="maxauthtries"{print $2}' <<<"$SSHD_T" | tail -n1)"
 
 echo "[2] Межсетевой экран"
-check "Межсетевой экран активен" "active" "$(sudo ufw status | awk '/^Status:/{print $2}')"
-# TODO 3: политика по умолчанию для входящего трафика равна deny
-check "Политика входящего трафика deny" "deny" "$(sudo ufw status verbose | awk '/^Default:/{print $2}')"
+check "Межсетевой экран активен" "active" "$(ufw status 2>/dev/null | awk '/^Status:/{print $2}')"
+check "Политика входящего трафика deny" "deny" \
+  "$(ufw status verbose 2>/dev/null | awk '/^Default:/{print tolower($2)}')"
 
 echo "[3] Учётные записи"
-awk -F: '$3>=1000 && $3<65534 {printf "      %s (uid=%s)\n",$1,$3}' /etc/passwd
+awk -F: '$3 >= 1000 && $3 < 65534 {printf "      %s (uid=%s)\n", $1, $3}' /etc/passwd
 
 echo "[4] Веб-сервер"
-check "Служба nginx активна"        "active" "$(systemctl is-active nginx)"
-sudo nginx -t > /dev/null 2>&1 && nginx_ok="0" || nginx_ok="1"
-check "Конфигурация nginx корректна" "0" "$nginx_ok"
-days_left="$(openssl x509 -in /etc/ssl/certs/devops.crt -noout -checkend 2592000 && echo ok || echo expired)"
-check "Сертификат действителен > 30 дней" "ok" "$days_left"
-writable="$(find /var/www/devops-site -perm -o+w | wc -l)"
-check "Нет файлов, доступных на запись всем" "0" "$writable"
-keymode="$(sudo stat -c '%a' /etc/ssl/private/devops.key)"
-check "Права ключа TLS равны 600"    "600" "$keymode"
+check "Служба nginx активна" "active" "$(systemctl is-active nginx)"
+nginx -t >/dev/null 2>&1
+check "Конфигурация nginx корректна" "0" "$?"
+
+CERT=$(nginx -T 2>/dev/null | awk '/ssl_certificate[ \t]/{gsub(/;/,"");print $2; exit}')
+KEY=$(nginx -T 2>/dev/null | awk '/ssl_certificate_key/{gsub(/;/,"");print $2; exit}')
+if [ -n "$CERT" ] && openssl x509 -checkend 2592000 -noout -in "$CERT" >/dev/null 2>&1; then
+  ok "Сертификат действителен > 30 дней ($CERT)"
+else
+  fail "Сертификат действителен > 30 дней" "ok" "не найден или истекает"
+fi
+check "Нет файлов, доступных на запись всем" "0" \
+  "$(find / -xdev -type f -perm -0002 2>/dev/null | wc -l)"
+check "Права ключа TLS равны 600" "600" "$(stat -c %a "$KEY" 2>/dev/null)"
+
+echo "[5] Контейнеризация"
+check "Служба docker активна" "active" "$(systemctl is-active docker)"
+DB_CTR=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -Ei 'db|postgres' | head -n1)
+check "Контейнер СУБД в состоянии healthy" "healthy" \
+  "$(docker inspect -f '{{.State.Health.Status}}' "$DB_CTR" 2>/dev/null)"
+BAD_PORTS=$(ss -tln | awk '$5 ~ /:(5000|5432)$/ && $5 !~ /127\.0\.0\.1$/ && $5 !~ /\[::1\]$/ {n++} END {print n+0}')
+check "Порты 5000 и 5432 не прослушиваются вне 127.0.0.1" "0" "$BAD_PORTS"
+check "Права файла /home/devops/app/.env равны 600" "600" "$(stat -c %a /home/devops/app/.env 2>/dev/null)"
 
 echo "Пройдено: $PASS, не пройдено: $FAIL"
-[[ $FAIL -eq 0 ]] && exit 0 || exit 1
+[ "$FAIL" -eq 0 ]
