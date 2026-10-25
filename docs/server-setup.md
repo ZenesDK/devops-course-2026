@@ -113,3 +113,77 @@ hostname -f                   # devops-vm.devops.local
   sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
     -keyout /etc/ssl/private/devops.key -out /etc/ssl/certs/devops.crt \
     -subj "/CN=devops.local" -addext "subjectAltName=DNS:devops.local"
+
+## 9. Контейнеризация
+
+### 9.1 Docker Engine
+Docker Engine установлен из официального репозитория Docker по инструкции
+для Ubuntu (docs.docker.com/engine/install/ubuntu/); пакет docker.io из
+репозитория дистрибутива не использовался.
+Версии: Docker Engine 29.9.1, Compose v5.6.0 (плагин).
+Проверка: docker version — присутствует раздел Server; docker compose version.
+
+### 9.2 Группа docker
+Пользователь devops включён в группу docker:
+
+    sudo usermod -aG docker devops
+
+и запускает контейнеры без sudo (docker run --rm hello-world).
+Внимание: членство в группе docker эквивалентно доступу уровня root
+(возможен запуск контейнера с монтированием корня хоста на запись),
+поэтому в группу включена только учётная запись, имеющая право sudo.
+
+### 9.3 Проект приложения
+Исходный код хранится в репозитории devops-course-2026 на хостовой системе,
+каталог app/ (ветка feature/docker), доставка на сервер:
+
+    rsync -avz --delete --exclude=.env app/ devops:app/
+
+Рабочий каталог на сервере: /home/devops/app. Состав каталога: app.py,
+requirements.txt, Dockerfile, .dockerignore, .env.example,
+docker-compose.yml. Файл .env создаётся только на сервере из шаблона
+.env.example.
+
+### 9.4 Переменные окружения
+/home/devops/app/.env содержит: POSTGRES_DB, POSTGRES_USER,
+POSTGRES_PASSWORD (случайный, openssl rand -hex 16), DB_HOST=db.
+Права доступа 600 (rw-------, владелец devops). В репозиторий файл не
+включается: имя .env добавлено в .gitignore, при доставке исключается
+параметром --exclude=.env; копирование файла на хостовую систему запрещено.
+
+### 9.5 Публикуемые порты и сети
+Публикуется только порт сервиса app: "127.0.0.1:5000:5000" — привязка к
+loopback-адресу; доступ извне осуществляется исключительно через обратный
+прокси Nginx (HTTPS, порт 443, location /app/). Порт СУБД 5432 не
+публикуется: приложение обращается к сервису db по имени через
+изолированную сеть проекта backend, создаваемую Compose.
+Проверка:
+
+    sudo ss -tlnp | grep -E ':(5000|5432)\b'
+
+— единственный прослушиваемый сокет 127.0.0.1:5000; порт 5432 на сервере
+не прослушивается.
+
+### 9.6 Именованные тома
+Данные СУБД хранятся в именованном томе db_data, смонтированном в
+/var/lib/postgresql/data контейнера db. Том управляется Docker независимо
+от жизненного цикла контейнеров: docker compose down сохраняет том
+(счётчик Visits продолжается после пересоздания контейнеров),
+docker compose down -v удаляет том вместе с данными.
+Проверка: docker volume ls.
+
+### 9.7 Обратный прокси-сервер
+/etc/nginx/sites-available/devops-site, HTTPS-блок (server 443 ssl).
+Статический ресурс (location /) сохранён; для приложения добавлено:
+
+    location /app/ {
+        proxy_pass http://127.0.0.1:5000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+Завершающий символ "/" в значении proxy_pass заменяет префикс /app/ на "/":
+запрос /app/health передаётся приложению как /health.
+Проверка: curl --cacert ~/devops.crt https://devops.local/app/
